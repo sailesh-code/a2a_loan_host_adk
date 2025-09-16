@@ -99,20 +99,25 @@ class HostAgent:
 
     def root_instruction(self, context: ReadonlyContext) -> str:
         return f"""
-        **Role:** You are the Host Agent, an expert scheduler for loan applications to bank agents. Your primary function is to coordinate with bank agents to make a loan application.
+        **Role:** You are the Host Agent, an expert coordinator for loan applications to bank agents. Your primary function is to coordinate with bank agents to process loan applications using JSON communication.
 
         **Core Directives:**
-
-        *   **Initiate Planning:** When asked to make a loan application, first determine the desired amount from the user.
-        *   **Task Delegation:** Use the `make_loan_application` tool to prepare a loan application.
-            *   This tool requires a `amount`.
-        *   **Analyze Responses:** Once you have approval from all bank agents, analyze the responses to find the approval status.
-        *  
-        *   **Tool Reliance:** Strictly rely on available tools to address user requests. Do not generate responses based on assumptions.
-        *   **Readability:** Make sure to respond in a concise and easy to read format (bullet points are good).
-        *   **Send Message:** Use the `send_message` tool to send the loan application to the bank agent.
-            *   This tool requires a `agent_name`, `task`, and `tool_context`.
-
+        
+        **Loan Application Workflow:**
+        1. When asked to make a loan application, first use `make_loan_application(loan_id, amount)` 
+        2. Take the `json_payload` from `make_loan_application` output and pass it directly to `send_message`
+        3. Use `send_message(agent_name, json_payload, tool_context)` to send the JSON data to the bank agent
+        
+        **Example Workflow:**
+        - User: "Make a loan application for loan_id 12345 with amount 50000"
+        - Step 1: Call `make_loan_application("12345", "50000")` → returns {{"json_payload": {{"type": "loan_status_request", "loan_id": "12345", "amount": 50000.0}}, "message": "..."}}
+        - Step 2: Call `send_message("Loan Agent", result["json_payload"], tool_context)`
+        
+        **Important:** 
+        - Always use both tools in sequence - first `make_loan_application`, then `send_message`
+        - Pass the `json_payload` directly to `send_message` - no text conversion needed
+        - All communication is now pure JSON format
+        
         <Available Agents>
         {self.agents}
         </Available Agents>
@@ -160,8 +165,8 @@ class HostAgent:
                     "updates": "The host agent is thinking...",
                 }
 
-    async def send_message(self, agent_name: str, task: str, tool_context: ToolContext):
-        """Sends a task to a remote friend agent."""
+    async def send_message(self, agent_name: str, json_data: dict, tool_context: ToolContext):
+        """Sends JSON data to a remote friend agent."""
         if agent_name not in self.remote_agent_connections:
             raise ValueError(f"Agent {agent_name} not found")
         client = self.remote_agent_connections[agent_name]
@@ -175,10 +180,19 @@ class HostAgent:
         context_id = state.get("context_id", str(uuid.uuid4()))
         message_id = str(uuid.uuid4())
 
+        print(f"DEBUG: send_message called with JSON data: {json_data}")
+        
+        # Always send as JSON - no text fallback needed
         payload = {
             "message": {
                 "role": "user",
-                "parts": [{"type": "text", "text": task}],
+                "parts": [{
+                    "type": "file",
+                    "file": {
+                        "bytes": json.dumps(json_data),
+                        "mimeType": "application/json"
+                    }
+                }],
                 "messageId": message_id,
                 "taskId": task_id,
                 "contextId": context_id,
@@ -204,7 +218,20 @@ class HostAgent:
         if json_content.get("result", {}).get("artifacts"):
             for artifact in json_content["result"]["artifacts"]:
                 if artifact.get("parts"):
-                    resp.extend(artifact["parts"])
+                    for part in artifact["parts"]:
+                        # Handle JSON responses with bytes
+                        if (part.get("type") == "file" and 
+                            part.get("file", {}).get("mimeType") == "application/json"):
+                            try:
+                                json_data = json.loads(part["file"]["bytes"])
+                                resp.append(json_data)
+                            except (json.JSONDecodeError, KeyError):
+                                resp.append(part)
+                        # Handle text responses (fallback)
+                        elif part.get("type") == "text":
+                            resp.append(part)
+                        else:
+                            resp.append(part)
         return resp
 
 

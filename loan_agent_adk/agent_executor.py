@@ -1,4 +1,5 @@
 import asyncio
+import json
 import logging
 from collections.abc import AsyncGenerator
 
@@ -44,6 +45,7 @@ class LoanAgentExecutor(AgentExecutor):
         session_id: str,
         task_updater: TaskUpdater,
     ) -> None:
+        print(f"DEBUG: Processing request with message: {new_message}")
         session_obj = await self._upsert_session(session_id)
         session_id = session_obj.id
 
@@ -118,23 +120,32 @@ def convert_a2a_parts_to_genai(parts: list[Part]) -> list[types.Part]:
 
 def convert_a2a_part_to_genai(part: Part) -> types.Part:
     """Convert a single A2A Part type into a Google Gen AI Part type."""
+    print(f"DEBUG: Converting A2A part to GenAI: {part}")
     root = part.root
     if isinstance(root, TextPart):
+        print(f"DEBUG: Converting TextPart: {root.text}")
         return types.Part(text=root.text)
     if isinstance(root, FilePart):
         if isinstance(root.file, FileWithUri):
+            print(f"DEBUG: Converting FileWithUri: {root.file.uri}")
             return types.Part(
                 file_data=types.FileData(
                     file_uri=root.file.uri, mime_type=root.file.mimeType
                 )
             )
         if isinstance(root.file, FileWithBytes):
-            return types.Part(
-                inline_data=types.Blob(
-                    data=root.file.bytes.encode("utf-8"),
-                    mime_type=root.file.mimeType or "application/octet-stream",
+            print(f"DEBUG: Converting FileWithBytes: {root.file.bytes[:100]}... (mimeType: {root.file.mimeType})")
+            # For JSON content, we should pass it as text to the LLM, not as inline_data
+            if root.file.mimeType == "application/json":
+                print(f"DEBUG: Converting JSON to text: {root.file.bytes}")
+                return types.Part(text=root.file.bytes)
+            else:
+                return types.Part(
+                    inline_data=types.Blob(
+                        data=root.file.bytes.encode("utf-8"),
+                        mime_type=root.file.mimeType or "application/octet-stream",
+                    )
                 )
-            )
         raise ValueError(f"Unsupported file type: {type(root.file)}")
     raise ValueError(f"Unsupported part type: {type(part)}")
 
@@ -151,6 +162,44 @@ def convert_genai_parts_to_a2a(parts: list[types.Part]) -> list[Part]:
 def convert_genai_part_to_a2a(part: types.Part) -> Part:
     """Convert a single Google Gen AI Part type into an A2A Part type."""
     if part.text:
+        # Always try to parse as JSON first for loan agent responses
+        text_content = part.text.strip()
+        print(f"DEBUG: Converting GenAI text to A2A: {text_content[:100]}...")
+        
+        if text_content.startswith('{') and text_content.endswith('}'):
+            try:
+                # Validate it's valid JSON
+                json.loads(text_content)
+                print(f"DEBUG: Valid JSON detected, converting to FileWithBytes")
+                # Convert to JSON blob with proper mime type
+                return Part(
+                    root=FilePart(
+                        file=FileWithBytes(
+                            bytes=text_content,
+                            mimeType="application/json",
+                        )
+                    )
+                )
+            except json.JSONDecodeError as e:
+                print(f"DEBUG: JSON decode error: {e}, keeping as text")
+                # Not valid JSON, keep as text
+                pass
+        else:
+            # If it doesn't look like JSON, wrap it in a JSON error response
+            print(f"DEBUG: Non-JSON response detected, wrapping in error JSON")
+            error_response = {
+                "error": "invalid_response",
+                "message": "Agent returned non-JSON response",
+                "raw_response": text_content
+            }
+            return Part(
+                root=FilePart(
+                    file=FileWithBytes(
+                        bytes=json.dumps(error_response),
+                        mimeType="application/json",
+                    )
+                )
+            )
         return Part(root=TextPart(text=part.text))
     if part.file_data:
         if not part.file_data.file_uri:

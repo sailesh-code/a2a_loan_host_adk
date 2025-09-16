@@ -49,11 +49,11 @@ def main():
         )
         agent_card = AgentCard(
             name="Loan Agent",
-            description="An agent that manages loan status.",
+            description="An agent that manages loan status using JSON communication.",
             url=f"http://{host}:{port}/",   
             version="1.0.0",
-            defaultInputModes=["text/plain"],
-            defaultOutputModes=["text/plain"],
+            defaultInputModes=["application/json"],
+            defaultOutputModes=["application/json"],
             capabilities=capabilities,
             skills=[skill],
         )
