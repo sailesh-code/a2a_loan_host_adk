@@ -134,7 +134,13 @@ class HostAgent:
             user_id=self._user_id,
             session_id=session_id,
         )
-        content = types.Content(role="user", parts=[types.Part.from_text(text=query)])
+        # Convert user query to JSON format for consistency
+        query_json = {
+            "type": "user_query",
+            "query": query,
+            "timestamp": datetime.now().isoformat()
+        }
+        content = types.Content(role="user", parts=[types.Part.from_text(text=json.dumps(query_json))])
         if session is None:
             session = await self._runner.session_service.create_session(
                 app_name=self._agent.name,
@@ -152,9 +158,19 @@ class HostAgent:
                     and event.content.parts
                     and event.content.parts[0].text
                 ):
-                    response = "\n".join(
-                        [p.text for p in event.content.parts if p.text]
-                    )
+                    # Try to parse as JSON first
+                    text_content = event.content.parts[0].text.strip()
+                    try:
+                        # If it's valid JSON, use it directly
+                        json.loads(text_content)
+                        response = text_content
+                    except json.JSONDecodeError:
+                        # If not JSON, wrap in JSON format
+                        response = json.dumps({
+                            "type": "text_response",
+                            "content": text_content,
+                            "timestamp": datetime.now().isoformat()
+                        })
                 yield {
                     "is_task_complete": True,
                     "content": response,
@@ -213,25 +229,63 @@ class HostAgent:
 
         response_content = send_response.root.model_dump_json(exclude_none=True)
         json_content = json.loads(response_content)
+        
+        print(f"DEBUG: Response structure: {json_content.get('result', {}).keys()}")
 
         resp = []
         if json_content.get("result", {}).get("artifacts"):
-            for artifact in json_content["result"]["artifacts"]:
+            print(f"DEBUG: Found {len(json_content['result']['artifacts'])} artifacts")
+            for i, artifact in enumerate(json_content["result"]["artifacts"]):
                 if artifact.get("parts"):
-                    for part in artifact["parts"]:
-                        # Handle JSON responses with bytes
-                        if (part.get("type") == "file" and 
-                            part.get("file", {}).get("mimeType") == "application/json"):
+                    print(f"DEBUG: Found {len(artifact['parts'])} parts in artifact {i}")
+                    for j, part in enumerate(artifact["parts"]):
+                        print(f"DEBUG: Part {j}: type={part.get('type')}, has_file={bool(part.get('file'))}")
+                        # Handle JSON responses with bytes (check for file with JSON mimeType)
+                        if (part.get("file", {}).get("mimeType") == "application/json"):
+                            print(f"DEBUG: Processing JSON file part (type={part.get('type')})")
                             try:
                                 json_data = json.loads(part["file"]["bytes"])
+                                print(f"DEBUG: Successfully parsed JSON: {json_data}")
+                                resp.append(json_data)
+                            except (json.JSONDecodeError, KeyError) as e:
+                                print(f"DEBUG: JSON decode error: {e}")
+                                resp.append(part)
+                        # Handle text parts that might contain JSON
+                        elif part.get("type") == "text":
+                            print(f"DEBUG: Processing text part: {part.get('text', '')[:100]}...")
+                            try:
+                                # Try to parse as JSON
+                                json_data = json.loads(part["text"])
+                                print(f"DEBUG: Successfully parsed text as JSON: {json_data}")
                                 resp.append(json_data)
                             except (json.JSONDecodeError, KeyError):
-                                resp.append(part)
-                        # Handle text responses (fallback)
-                        elif part.get("type") == "text":
-                            resp.append(part)
+                                # Wrap non-JSON text in error format
+                                error_response = {
+                                    "error": "text_response",
+                                    "message": "Received text response instead of JSON",
+                                    "text_content": part.get("text", "")
+                                }
+                                resp.append(error_response)
+                        # Handle any remaining parts (should all be JSON now)
                         else:
-                            resp.append(part)
+                            print(f"DEBUG: Unexpected part type: {part.get('type')}")
+                            # If we get unexpected part types, wrap in error JSON
+                            error_response = {
+                                "error": "unexpected_response_format",
+                                "message": "Received unexpected response format",
+                                "part_type": part.get("type", "unknown"),
+                                "part_keys": list(part.keys()),
+                                "full_part": part
+                            }
+                            resp.append(error_response)
+        else:
+            print(f"DEBUG: No artifacts found in response")
+            error_response = {
+                "error": "no_artifacts",
+                "message": "No artifacts found in response",
+                "response_structure": json_content
+            }
+            resp.append(error_response)
         return resp
 
 

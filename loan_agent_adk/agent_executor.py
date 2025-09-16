@@ -54,6 +54,7 @@ class LoanAgentExecutor(AgentExecutor):
                 parts = convert_genai_parts_to_a2a(
                     event.content.parts if event.content and event.content.parts else []
                 )
+                print(f"DEBUG: Loan agent final response parts: {parts}")
                 logger.debug("Yielding final response: %s", parts)
                 task_updater.add_artifact(parts)
                 task_updater.complete()
@@ -200,7 +201,21 @@ def convert_genai_part_to_a2a(part: types.Part) -> Part:
                     )
                 )
             )
-        return Part(root=TextPart(text=part.text))
+        # This should never happen for loan agent - all responses should be JSON
+        # Wrap any remaining text in error JSON
+        error_response = {
+            "error": "unexpected_text_response",
+            "message": "Loan agent returned unexpected text response",
+            "raw_response": part.text
+        }
+        return Part(
+            root=FilePart(
+                file=FileWithBytes(
+                    bytes=json.dumps(error_response),
+                    mimeType="application/json",
+                )
+            )
+        )
     if part.file_data:
         if not part.file_data.file_uri:
             raise ValueError("File URI is missing")
